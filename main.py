@@ -13,6 +13,12 @@ from typing import Dict
 import torch
 import nltk.data
 nltk.download('punkt')
+import nltk
+nltk.download('wordnet')
+nltk.download('wordnet_ic')
+from nltk.corpus import wordnet_ic
+from nltk.corpus import wordnet as wn
+from nltk.tokenize import word_tokenize
 
 
 class ColBERTConfig(PretrainedConfig):
@@ -22,6 +28,7 @@ class ColBERTConfig(PretrainedConfig):
     dropout: float = 0.0
     return_vecs: bool = False
     trainable: bool = True
+
 
 class ColBERT(PreTrainedModel):
     """
@@ -103,12 +110,33 @@ class KeyphraseExtractionPipeline(TokenClassificationPipeline):
 
 
 def sentence_split(text):
+    """
+    Split text into sentences.
+
+    Args:
+        text (str): A string of text.
+
+    Returns:
+        new_text (list(str)): A list of sentences.
+    """
     tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
     new_text = tokenizer.tokenize(text)
     return new_text
 
 
 def score_passage_query(passages, queries, tokenizer, model):
+    """
+    Score passages with queries.
+
+    Args:
+        passages (list(str)): A list of passages.
+        queries (list(str)): A list of queries.
+        tokenizer (transformers.tokenization_utils_base.PreTrainedTokenizerBase): Tokenizer used for the model.
+        model (transformers.modeling_utils.PreTrainedModel): Information retrieval model used for scoring.
+
+    Returns:
+        rank_dict (dict(dict(int:float))): A dictionary of queries and their corresponding passages indices and scores.
+    """
     rank_dict = {}
     for query in queries:
         rank_dict[query] = {}
@@ -125,6 +153,17 @@ def score_passage_query(passages, queries, tokenizer, model):
 
 
 def retrieve_top_n_passage(scores, n_passages, ratio=0.3):
+    """
+    Retrieve top n passages for each query.
+
+    Args:
+        scores (dict(dict(int:float))): A dictionary of queries and their corresponding passages indices and scores.
+        n_passages (int): The number of passages to retrieve for each query.
+        ratio (float): The ratio of passages to retrieve for each query.
+
+    Returns:
+        retrieved (dict(list(int))): A dictionary of queries and their corresponding retrieved passages.
+    """
     top_passages = int(n_passages * ratio)
     retrieved = {}
     for query in scores:
@@ -134,6 +173,64 @@ def retrieve_top_n_passage(scores, n_passages, ratio=0.3):
         ranking = [passage_info[0] for passage_info in ranking]
         retrieved[query] = ranking
     return retrieved
+
+
+def score_tokens(seeds, tokens):
+    """
+    Calculate the similarity between the seed and the tokens using
+    Jiang-Conrath similarity.
+
+    Args:
+        seeds (list): A list of seed words.
+        tokens (list): A list of tokens to compare to the seed word.
+
+    Returns:
+        tokens_scores (dict(dict(int:float))): A dictionary of seed words and their corresponding tokens indices and scores.
+    """
+    tokens_scores = {}
+    for seed in seeds:
+        # create dictionary to store synonyms and their scores
+        tokens_scores[seed] = {}
+
+        # get the synset of the word
+        syn2 = wn.synsets(seed)[0]
+
+        ic = wordnet_ic.ic('ic-brown.dat')
+
+        # loop through the tokens
+        for idx, token in enumerate(tokens):
+            try:
+                # get the synset of the seed
+                syn1 = wn.synsets(token)[0]
+
+                # calculate the similarity score
+                tokens_scores[seed][idx] = syn1.jcn_similarity(syn2, ic)
+            except:
+                pass
+    return tokens_scores
+
+
+def select_relevant_tokens(tokens_scores, ratio=0.6):
+    """
+    Select the most relevant tokens based on the similarity scores.
+
+    Args:
+        tokens_scores (dict(dict(int:float))): A dictionary of seed words and their corresponding tokens indices and scores.
+        ratio (float): The ratio of tokens to select for each seed word.
+
+    Returns:
+        selected_tokens (dict(list(int))): A dictionary of seed words and their corresponding selected tokens.
+    """
+    selected_tokens = {}
+    for seed in tokens_scores:
+        n_tokens = int(len(tokens_scores[seed]) * ratio)
+        relevant_tokens = sorted(tokens_scores[seed].items(), key=lambda x: x[1], reverse=True)[:n_tokens]
+        print(relevant_tokens)
+        # sort ranking again, to rearrange by appearance order for each passage in the corpus
+        relevant_tokens.sort(key=lambda x: x[0])
+        relevant_tokens = [token_info[0] for token_info in relevant_tokens]
+        selected_tokens[seed] = relevant_tokens
+    return selected_tokens
 
 
 if __name__ == "__main__":
@@ -166,25 +263,36 @@ if __name__ == "__main__":
             chapter_relevant.append(sentence_list_chapter_1[passage_nb])
 
         print("Top 5 relevant sentences: ", chapter_relevant[:5])
-        # print(chapter_relevant[:3])
         chapter_relevant = ' '.join(chapter_relevant)
+
+        wordnet_tokens = word_tokenize(page)
+        print(wordnet_tokens[256])
+        print(wordnet_tokens[101])
+        score_similarity_wordnet = score_tokens(seed[0], wordnet_tokens)
+        token_relevant_wordnet = select_relevant_tokens(score_similarity_wordnet, seeds=seed)
+
+        chapter_relevant_wordnet = []
+        for token_nb in token_relevant_wordnet:
+            chapter_relevant_wordnet.append(wordnet_tokens[token_nb])
+
+        chapter_relevant_wordnet = ' '.join(chapter_relevant_wordnet)
+
 
         model_name = "ml6team/keyphrase-extraction-distilbert-inspec"
         extractor = KeyphraseExtractionPipeline(model=model_name)
         keyphrases_w_retrieval = extractor(chapter_relevant)
         print(f"Keywords with info retrieval: {keyphrases_w_retrieval}\n")
 
-        # Load pipeline
-        # model_name = "ml6team/keyphrase-extraction-distilbert-inspec"
-        # extractor = KeyphraseExtractionPipeline(model=model_name)
-        #
-        # df = pd.read_csv("~/Documents/R&D/Suggestion Engine/data/it_emerging_markets.csv")
-        # text = df['Content'].values
-        #
-
         keyphrases = extractor(text[0])
         print(f"Keywords without info retrieval: {keyphrases}\n")
 
+        keyphrases_wordnet = extractor(chapter_relevant_wordnet)
+        print(f"Keywords with wordnet similarity: {keyphrases_wordnet}\n")
+
         diff_values = list(set(keyphrases_w_retrieval) - set(keyphrases))  # call to this function
         print(diff_values, "\n")
+
+
+
+
 
